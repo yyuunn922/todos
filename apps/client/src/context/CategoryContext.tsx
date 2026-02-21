@@ -9,8 +9,7 @@ import {
 import type { Category, CategoryInput } from '#/types/todo'
 import { buildTree, sortByOrder } from '#/lib/tree'
 import type { TreeNode } from '#/types/todo'
-
-const STORAGE_KEY = 'categories_data'
+import { client, TABLE_IDS } from '#/services/connectbase'
 
 interface CategoryContextType {
   categories: Category[]
@@ -27,39 +26,30 @@ interface CategoryContextType {
 
 const CategoryContext = createContext<CategoryContextType | null>(null)
 
-function loadFromStorage(): Category[] {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : []
-  } catch {
-    return []
+function rowToCategory(item: { id: string; data: Record<string, unknown> }): Category {
+  return {
+    id: item.id,
+    name: (item.data.name as string) || '',
+    color: (item.data.color as string) || '#6b7280',
+    parentId: item.data.parentId as string | undefined,
+    order: (item.data.order as number) || 0,
   }
-}
-
-function saveToStorage(categories: Category[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(categories))
-}
-
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 }
 
 export function CategoryProvider({ children }: { children: ReactNode }) {
   const [categories, setCategories] = useState<Category[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(
-    null
-  )
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     try {
-      const loaded = loadFromStorage()
-      setCategories(sortByOrder(loaded))
+      const result = await client.database.getData(TABLE_IDS.categories, { limit: 1000 })
+      setCategories(sortByOrder(result.data.map(rowToCategory)))
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load categories')
+      setError(err instanceof Error ? err.message : '카테고리를 불러오는데 실패했습니다')
     } finally {
       setIsLoading(false)
     }
@@ -69,21 +59,17 @@ export function CategoryProvider({ children }: { children: ReactNode }) {
     refresh()
   }, [refresh])
 
-  useEffect(() => {
-    if (!isLoading) {
-      saveToStorage(categories)
-    }
-  }, [categories, isLoading])
-
   const addCategory = useCallback(
     async (input: CategoryInput): Promise<Category> => {
-      const newCategory: Category = {
-        id: generateId(),
-        name: input.name,
-        color: input.color,
-        parentId: input.parentId,
-        order: input.order,
-      }
+      const created = await client.database.createData(TABLE_IDS.categories, {
+        data: {
+          name: input.name,
+          color: input.color,
+          parentId: input.parentId || '',
+          order: input.order,
+        },
+      })
+      const newCategory = rowToCategory(created)
       setCategories((prev) => sortByOrder([...prev, newCategory]))
       return newCategory
     },
@@ -92,6 +78,9 @@ export function CategoryProvider({ children }: { children: ReactNode }) {
 
   const updateCategory = useCallback(
     async (id: string, input: Partial<CategoryInput>) => {
+      await client.database.updateData(TABLE_IDS.categories, id, {
+        data: input as Record<string, unknown>,
+      })
       setCategories((prev) =>
         sortByOrder(
           prev.map((cat) => (cat.id === id ? { ...cat, ...input } : cat))
@@ -102,7 +91,14 @@ export function CategoryProvider({ children }: { children: ReactNode }) {
   )
 
   const deleteCategory = useCallback(async (id: string) => {
-    setCategories((prev) => prev.filter((cat) => cat.id !== id && cat.parentId !== id))
+    await client.database.deleteData(TABLE_IDS.categories, id)
+    setCategories((prev) => {
+      const children = prev.filter((c) => c.parentId === id)
+      children.forEach((child) => {
+        client.database.deleteData(TABLE_IDS.categories, child.id).catch(() => {})
+      })
+      return prev.filter((cat) => cat.id !== id && cat.parentId !== id)
+    })
   }, [])
 
   const categoryTree = buildTree(categories)

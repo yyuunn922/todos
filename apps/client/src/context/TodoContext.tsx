@@ -9,8 +9,7 @@ import {
 import type { Todo, TodoInput, TodoStatus } from '#/types/todo'
 import { buildTree, sortByOrder } from '#/lib/tree'
 import type { TreeNode } from '#/types/todo'
-
-const STORAGE_KEY = 'todos_data'
+import { client, TABLE_IDS } from '#/services/connectbase'
 
 type FilterType = 'all' | TodoStatus
 
@@ -32,21 +31,22 @@ interface TodoContextType {
 
 const TodoContext = createContext<TodoContextType | null>(null)
 
-function loadFromStorage(): Todo[] {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : []
-  } catch {
-    return []
+function rowToTodo(item: { id: string; data: Record<string, unknown> }): Todo {
+  return {
+    id: item.id,
+    title: (item.data.title as string) || '',
+    description: item.data.description as string | undefined,
+    notes: item.data.notes as string | undefined,
+    checklist: item.data.checklist as Todo['checklist'],
+    status: (item.data.status as TodoStatus) || 'pending',
+    priority: (item.data.priority as Todo['priority']) || 'medium',
+    categoryId: item.data.categoryId as string | undefined,
+    parentId: item.data.parentId as string | undefined,
+    dueDate: item.data.dueDate as string | undefined,
+    order: (item.data.order as number) || 0,
+    createdAt: (item.data.createdAt as string) || new Date().toISOString(),
+    updatedAt: (item.data.updatedAt as string) || new Date().toISOString(),
   }
-}
-
-function saveToStorage(todos: Todo[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos))
-}
-
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 }
 
 export function TodoProvider({ children }: { children: ReactNode }) {
@@ -59,10 +59,10 @@ export function TodoProvider({ children }: { children: ReactNode }) {
     setIsLoading(true)
     setError(null)
     try {
-      const loaded = loadFromStorage()
-      setTodos(sortByOrder(loaded))
+      const result = await client.database.getData(TABLE_IDS.todos, { limit: 1000 })
+      setTodos(sortByOrder(result.data.map(rowToTodo)))
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load todos')
+      setError(err instanceof Error ? err.message : '할 일을 불러오는데 실패했습니다')
     } finally {
       setIsLoading(false)
     }
@@ -72,26 +72,37 @@ export function TodoProvider({ children }: { children: ReactNode }) {
     refresh()
   }, [refresh])
 
-  useEffect(() => {
-    if (!isLoading) {
-      saveToStorage(todos)
-    }
-  }, [todos, isLoading])
-
   const addTodo = useCallback(async (input: TodoInput): Promise<Todo> => {
     const now = new Date().toISOString()
-    const newTodo: Todo = {
-      id: generateId(),
-      ...input,
-      createdAt: now,
-      updatedAt: now,
-    }
+    const created = await client.database.createData(TABLE_IDS.todos, {
+      data: {
+        title: input.title,
+        description: input.description || '',
+        notes: input.notes || '',
+        checklist: input.checklist || [],
+        status: input.status,
+        priority: input.priority,
+        categoryId: input.categoryId || '',
+        parentId: input.parentId || '',
+        dueDate: input.dueDate || '',
+        order: input.order,
+        createdAt: now,
+        updatedAt: now,
+      },
+    })
+    const newTodo = rowToTodo(created)
     setTodos((prev) => sortByOrder([...prev, newTodo]))
     return newTodo
   }, [])
 
   const updateTodo = useCallback(
     async (id: string, input: Partial<TodoInput>) => {
+      await client.database.updateData(TABLE_IDS.todos, id, {
+        data: {
+          ...input,
+          updatedAt: new Date().toISOString(),
+        } as Record<string, unknown>,
+      })
       setTodos((prev) =>
         sortByOrder(
           prev.map((todo) =>
@@ -106,7 +117,14 @@ export function TodoProvider({ children }: { children: ReactNode }) {
   )
 
   const deleteTodo = useCallback(async (id: string) => {
-    setTodos((prev) => prev.filter((todo) => todo.id !== id && todo.parentId !== id))
+    await client.database.deleteData(TABLE_IDS.todos, id)
+    setTodos((prev) => {
+      const children = prev.filter((t) => t.parentId === id)
+      children.forEach((child) => {
+        client.database.deleteData(TABLE_IDS.todos, child.id).catch(() => {})
+      })
+      return prev.filter((todo) => todo.id !== id && todo.parentId !== id)
+    })
   }, [])
 
   const reorderTodos = useCallback(
@@ -124,6 +142,15 @@ export function TodoProvider({ children }: { children: ReactNode }) {
         order: index,
       }))
       setTodos(updatedTodos)
+
+      const updatePromises = updatedTodos
+        .filter((t, i) => todos[i]?.id !== t.id)
+        .map((t) =>
+          client.database.updateData(TABLE_IDS.todos, t.id, {
+            data: { order: t.order },
+          }).catch(() => {})
+        )
+      await Promise.all(updatePromises)
     },
     [todos]
   )

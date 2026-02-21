@@ -164,11 +164,13 @@ async function checkUserApproval(loginId: string): Promise<boolean> {
 
   // connectbase 테이블에서 승인된 사용자 확인
   try {
-    const result = await client.table(TABLE_IDS.approvedUsers).select({
-      filter: { login_id: { eq: loginId }, approved: { eq: true } },
-      limit: 1,
-    })
-    return result.data.length > 0
+    const result = await client.database.getData(TABLE_IDS.approvedUsers, { limit: 1000 })
+    return result.data.some(
+      (item) =>
+        item.data.login_id === loginId &&
+        item.data.approved === true &&
+        item.data.suspended !== true,
+    )
   } catch {
     // 테이블이 없거나 오류 시 하드코딩 목록만 사용
     return APPROVED_LOGIN_IDS.includes(loginId)
@@ -177,11 +179,13 @@ async function checkUserApproval(loginId: string): Promise<boolean> {
 
 async function addPendingUser(loginId: string, name?: string): Promise<void> {
   try {
-    await client.table(TABLE_IDS.approvedUsers).insert({
-      login_id: loginId,
-      name: name || '',
-      approved: false,
-      requestedAt: new Date().toISOString(),
+    await client.database.createData(TABLE_IDS.approvedUsers, {
+      data: {
+        login_id: loginId,
+        name: name || '',
+        approved: false,
+        requestedAt: new Date().toISOString(),
+      },
     })
   } catch {
     // 테이블이 없으면 무시
